@@ -2,11 +2,7 @@ package comp3911.cwk2;
 
 import java.io.File;
 import java.io.IOException;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -26,8 +22,8 @@ import freemarker.template.TemplateExceptionHandler;
 public class AppServlet extends HttpServlet {
 
   private static final String CONNECTION_URL = "jdbc:sqlite:db.sqlite3";
-  private static final String AUTH_QUERY = "select * from user where username='%s' and password='%s'";
-  private static final String SEARCH_QUERY = "select * from patient where surname='%s' collate nocase";
+  private static final String PREPARED_AUTH_QUERY = "select * from user where username=? and password=?";
+  private static final String PREPARED_SEARCH_QUERY = "select * from patient where surname=? collate nocase";
 
   private final Configuration fm = new Configuration(Configuration.VERSION_2_3_28);
   private Connection database;
@@ -60,6 +56,15 @@ public class AppServlet extends HttpServlet {
     }
   }
 
+  public static String encodeForHTML(String userInput) {
+    return userInput.replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll("\"", "&quot;")
+            .replaceAll("'", "&#x27;")
+            .replaceAll("/", "&#x2F;");
+  }
+
   @Override
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
    throws ServletException, IOException {
@@ -77,10 +82,10 @@ public class AppServlet extends HttpServlet {
   @Override
   protected void doPost(HttpServletRequest request, HttpServletResponse response)
    throws ServletException, IOException {
-     // Get form parameters
-    String username = request.getParameter("username");
-    String password = request.getParameter("password");
-    String surname = request.getParameter("surname");
+    // Get form parameters
+     String username = encodeForHTML(request.getParameter("username"));
+     String password = encodeForHTML(request.getParameter("password"));
+     String surname = encodeForHTML(request.getParameter("surname"));
 
     try {
       if (authenticated(username, password)) {
@@ -103,18 +108,21 @@ public class AppServlet extends HttpServlet {
   }
 
   private boolean authenticated(String username, String password) throws SQLException {
-    String query = String.format(AUTH_QUERY, username, password);
-    try (Statement stmt = database.createStatement()) {
-      ResultSet results = stmt.executeQuery(query);
+    // Prepared statement version
+    try (PreparedStatement stmt = database.prepareStatement(PREPARED_AUTH_QUERY)) {
+      stmt.setString(1, username);
+      stmt.setString(2, password);
+      ResultSet results = stmt.executeQuery();
       return results.next();
     }
   }
 
   private List<Record> searchResults(String surname) throws SQLException {
     List<Record> records = new ArrayList<>();
-    String query = String.format(SEARCH_QUERY, surname);
-    try (Statement stmt = database.createStatement()) {
-      ResultSet results = stmt.executeQuery(query);
+    // Prepared statement version
+    try (PreparedStatement stmt = database.prepareStatement(PREPARED_SEARCH_QUERY)) {
+      stmt.setString(1, surname);
+      ResultSet results = stmt.executeQuery();
       while (results.next()) {
         Record rec = new Record();
         rec.setSurname(results.getString(2));
