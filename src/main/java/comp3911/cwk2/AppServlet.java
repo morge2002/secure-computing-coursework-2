@@ -2,6 +2,9 @@ package comp3911.cwk2;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -11,6 +14,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
@@ -29,6 +33,11 @@ public class AppServlet extends HttpServlet {
   private static final String AUTH_QUERY = "select * from user where username='%s' and password='%s'";
   private static final String SEARCH_QUERY = "select * from patient where surname='%s' collate nocase";
 
+  //The following are added to implement hashing passwords with a salt
+  private static final String UPDATE_HASHES = "update user set password='%s', salt='%s' where id='%s'";
+  private static final String ALL_USERS = "select * from user";
+  private static final String SALT_QUERY = "select salt from user where username='%s'";
+
   private final Configuration fm = new Configuration(Configuration.VERSION_2_3_28);
   private Connection database;
 
@@ -36,6 +45,7 @@ public class AppServlet extends HttpServlet {
   public void init() throws ServletException {
     configureTemplateEngine();
     connectToDatabase();
+  
   }
 
   private void configureTemplateEngine() throws ServletException {
@@ -54,6 +64,7 @@ public class AppServlet extends HttpServlet {
   private void connectToDatabase() throws ServletException {
     try {
       database = DriverManager.getConnection(CONNECTION_URL);
+      hashExistingPasswords(); //Added to retrospectively hash all passwords in db
     }
     catch (SQLException error) {
       throw new ServletException(error.getMessage());
@@ -77,7 +88,7 @@ public class AppServlet extends HttpServlet {
   @Override
   protected void doPost(HttpServletRequest request, HttpServletResponse response)
    throws ServletException, IOException {
-     // Get form parameters
+    // Get form parameters
     String username = request.getParameter("username");
     String password = request.getParameter("password");
     String surname = request.getParameter("surname");
@@ -102,13 +113,113 @@ public class AppServlet extends HttpServlet {
     }
   }
 
+  //Added to implement hashing passwords with a salt
+  //Gets the salt stored in the database for some user - used for logging in
+  private String getSalt(String username) throws SQLException {
+    String salt;
+
+    String query = String.format(SALT_QUERY, username);
+    try (Statement stmt = database.createStatement()){
+      ResultSet results = stmt.executeQuery(query);
+      salt = results.getString(1);
+    }
+
+    return salt;
+  }
+
   private boolean authenticated(String username, String password) throws SQLException {
-    String query = String.format(AUTH_QUERY, username, password);
+
+    String salt = getSalt(username);
+    System.out.println("Logging in with salt " +  salt);
+
+    //Modified query to add salt to the password provided then search for the hashed version of that
+    //Change required as a salted and triple hashed version of the password is now stored in the DB
+    String query = String.format(AUTH_QUERY, username, hashPassword(hashPassword(hashPassword(password + salt))));
     try (Statement stmt = database.createStatement()) {
       ResultSet results = stmt.executeQuery(query);
       return results.next();
     }
   }
+
+  //Method added as part of implementation of hashing passwords
+  //Takes a plain text string and returns string of the SHA-256 hash
+  private String hashPassword(String password){
+
+    try{
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] hashBytes = digest.digest(password.getBytes(StandardCharsets.UTF_8)); //SQLITE3 uses utf-8
+
+      StringBuilder hexString = new StringBuilder();
+
+      //SHA-256 is usually represented as a hexadecimal string
+      for (byte hashByte : hashBytes) {
+        String hex = Integer.toHexString(0xff & hashByte);
+        if (hex.length() == 1) hexString.append('0');
+          hexString.append(hex);
+      }
+
+      System.out.println(hexString.toString());
+    return hexString.toString();
+    }
+
+    catch(NoSuchAlgorithmException e){
+      System.out.println(e);
+      return "";
+    }
+    
+  }
+
+  //This method hashes any existing passwords which are still stored in plain text
+  private void hashExistingPasswords() throws SQLException{
+
+    //Get all users in the db so we can check/update their password
+    List<User> users = new ArrayList<>();
+    try (Statement userStmt = database.createStatement()){
+      ResultSet results = userStmt.executeQuery(ALL_USERS);
+      while(results.next()){
+        User rec = new User();
+          rec.setUserID(results.getString(1));
+          rec.setPassword(results.getString(4));
+          rec.setSalt(generateSalt());
+
+          if (rec.getPassword().length() != 64){
+            System.out.println("Unhashed password detected: " + rec.getPassword());
+            users.add(rec);
+          }
+      }
+
+      //The only users in this list are those with unhashed passwords
+      //Generates a salt for the user, adds it to the db and also uses it to hash their password which is persisted
+      for (User user: users){
+        try (Statement passwordStmt = database.createStatement()) {
+          String query = String.format(UPDATE_HASHES, hashPassword(hashPassword(hashPassword(user.getPassword() + user.getSalt()))), user.getSalt(), user.getUserID());
+          System.out.println("Hashing password " + user.getPassword() + " to " +  hashPassword(user.getPassword()));
+          passwordStmt.executeUpdate(query);
+        }
+      }
+    }
+  }
+
+  //Generates a random salt to be used in hashing
+  private String generateSalt(){
+
+    //Parameters for generating salt - limits ensure we only used uppercase letters
+    //SQLITE doesn't like special characters
+    int leftLimit = 65; 
+    int rightLimit = 90; 
+    int saltLength = 64; //Advised to use salt length = hash output length
+
+    Random random = new Random();
+    StringBuilder sb = new StringBuilder(saltLength);
+    for (int i = 0; i < saltLength; i++) {
+        int nextChar = leftLimit + (int)(random.nextFloat() * (rightLimit - leftLimit + 1));
+        sb.append((char) nextChar);
+    }
+
+    String salt = sb.toString();
+    System.out.println(salt);
+    return salt;
+    }
 
   private List<Record> searchResults(String surname) throws SQLException {
     List<Record> records = new ArrayList<>();
