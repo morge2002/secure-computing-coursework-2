@@ -7,6 +7,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -30,13 +31,13 @@ import freemarker.template.TemplateExceptionHandler;
 public class AppServlet extends HttpServlet {
 
   private static final String CONNECTION_URL = "jdbc:sqlite:db.sqlite3";
-  private static final String AUTH_QUERY = "select * from user where username='%s' and password='%s'";
+  private static final String AUTH_QUERY = "select * from user where username=? and password=?";
   private static final String SEARCH_QUERY = "select * from patient where surname='%s' collate nocase";
 
   //The following are added to implement hashing passwords with a salt
-  private static final String UPDATE_HASHES = "update user set password='%s', salt='%s' where id='%s'";
+  private static final String UPDATE_HASHES = "update user set password=?, salt=? where id=?";
   private static final String ALL_USERS = "select * from user";
-  private static final String SALT_QUERY = "select salt from user where username='%s'";
+  private static final String SALT_QUERY = "select salt from user where username=?";
 
   private final Configuration fm = new Configuration(Configuration.VERSION_2_3_28);
   private Connection database;
@@ -118,9 +119,9 @@ public class AppServlet extends HttpServlet {
   private String getSalt(String username) throws SQLException {
     String salt;
 
-    String query = String.format(SALT_QUERY, username);
-    try (Statement stmt = database.createStatement()){
-      ResultSet results = stmt.executeQuery(query);
+    try (PreparedStatement stmt = database.prepareStatement(SALT_QUERY)){
+      stmt.setString(1, username);
+      ResultSet results = stmt.executeQuery();
       salt = results.getString(1);
     }
 
@@ -130,13 +131,13 @@ public class AppServlet extends HttpServlet {
   private boolean authenticated(String username, String password) throws SQLException {
 
     String salt = getSalt(username);
-    System.out.println("Logging in with salt " +  salt);
 
     //Modified query to add salt to the password provided then search for the hashed version of that
     //Change required as a salted and triple hashed version of the password is now stored in the DB
-    String query = String.format(AUTH_QUERY, username, hashPassword(hashPassword(hashPassword(password + salt))));
-    try (Statement stmt = database.createStatement()) {
-      ResultSet results = stmt.executeQuery(query);
+    try (PreparedStatement stmt = database.prepareStatement(AUTH_QUERY)) {
+      stmt.setString(1, username);
+      stmt.setString(2, hashPassword(hashPassword(hashPassword(password + salt))));
+      ResultSet results = stmt.executeQuery();
       return results.next();
     }
   }
@@ -170,9 +171,11 @@ public class AppServlet extends HttpServlet {
   }
 
   //This method hashes any existing passwords which are still stored in plain text
+
   private void hashExistingPasswords() throws SQLException{
 
     //Get all users in the db so we can check/update their password
+      //Don't use prepared statements here since non-parameterised
     List<User> users = new ArrayList<>();
     try (Statement userStmt = database.createStatement()){
       ResultSet results = userStmt.executeQuery(ALL_USERS);
@@ -191,10 +194,13 @@ public class AppServlet extends HttpServlet {
       //The only users in this list are those with unhashed passwords
       //Generates a salt for the user, adds it to the db and also uses it to hash their password which is persisted
       for (User user: users){
-        try (Statement passwordStmt = database.createStatement()) {
-          String query = String.format(UPDATE_HASHES, hashPassword(hashPassword(hashPassword(user.getPassword() + user.getSalt()))), user.getSalt(), user.getUserID());
+        try (PreparedStatement passwordStmt = database.prepareStatement(UPDATE_HASHES)) {
+          passwordStmt.setString(1, hashPassword(hashPassword(hashPassword(user.getPassword() + user.getSalt()))));
+          passwordStmt.setString(2, user.getSalt());
+          passwordStmt.setString(3, user.getUserID());
+
           System.out.println("Hashing password " + user.getPassword() + " to " +  hashPassword(user.getPassword()));
-          passwordStmt.executeUpdate(query);
+          passwordStmt.executeUpdate();
         }
       }
     }
